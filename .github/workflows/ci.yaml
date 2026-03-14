@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+# CRITICAL: GitHub blocks OIDC token generation unless id-token: write is declared
+permissions:
+  id-token: write   # Allows GitHub Actions to request an OIDC JWT token
+  contents: read    # Allows reading the repo code
+
 env:
   AWS_REGION: us-east-1
   ECR_REPO: shop-frontend
