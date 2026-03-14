@@ -45,11 +45,12 @@ jobs:
           echo "image=$ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
       # ── Update Helm repo with new image tag (triggers ArgoCD sync) ──────────
-      - name: Update image tag in Helm repo
+      - name: Update image tag and repository in Helm repo
         env:
           IMAGE_TAG: ${{ github.sha }}
-          HELM_REPO: eks-shop-helm           # <── your Helm repo name
-          GH_PAT: ${{ secrets.HELM_REPO_PAT }}  # Personal Access Token with repo write
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}  # = <account-id>.dkr.ecr.us-east-1.amazonaws.com
+          HELM_REPO: eks-shop-helm
+          GH_PAT: ${{ secrets.HELM_REPO_PAT }}
           GH_USER: ${{ secrets.GH_USERNAME }}
         run: |
           git config --global user.email "ci@github-actions.com"
@@ -58,9 +59,11 @@ jobs:
           git clone https://$GH_USER:$GH_PAT@github.com/$GH_USER/$HELM_REPO.git helm-repo
           cd helm-repo
 
-          # Update the image tag in the Helm values file
-          sed -i "s/tag: .*/tag: \"$IMAGE_TAG\"/" shop-frontend/values.yaml
+          # Update BOTH the repo URL (account ID) AND the tag.
+          # This means you NEVER manually edit values.yaml — even when playground account changes!
+          sed -i "s|repository: .*|repository: \"$ECR_REGISTRY/shop-frontend\"|" shop-frontend/values.yaml
+          sed -i "s|tag: .*|tag: \"$IMAGE_TAG\"|" shop-frontend/values.yaml
 
           git add .
-          git commit -m "ci: update shop-frontend image to $IMAGE_TAG [skip ci]"
+          git commit -m "ci: update shop-frontend → $ECR_REGISTRY/shop-frontend:$IMAGE_TAG [skip ci]"
           git push
