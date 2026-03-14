@@ -1,4 +1,4 @@
-name: CI — Build & Push to ECR
+name: CI - Build and Push to ECR
 
 on:
   push:
@@ -6,10 +6,9 @@ on:
   pull_request:
     branches: [main]
 
-# CRITICAL: GitHub blocks OIDC token generation unless id-token: write is declared
 permissions:
-  id-token: write   # Allows GitHub Actions to request an OIDC JWT token
-  contents: read    # Allows reading the repo code
+  id-token: write   # Required for OIDC to assume AWS IAM role
+  contents: read    # Required to read source repo
 
 env:
   AWS_REGION: us-east-1
@@ -17,62 +16,57 @@ env:
 
 jobs:
   build-and-push:
-    name: Build Docker Image & Push to ECR
+    name: Build Docker Image and Push to ECR
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
 
-      # ── Authenticate to AWS using GitHub OIDC (no long-lived keys!) ──────────
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-ecr-role
           aws-region: ${{ env.AWS_REGION }}
 
-      # ── Login to ECR ─────────────────────────────────────────────────────────
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # ── Build, Tag, and Push Docker Image ────────────────────────────────────
-      - name: Build and push image
+      - name: Build and push image to ECR
+        id: build
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          echo "Building image: $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG"
           docker build -t $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG .
           docker tag  $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPO:latest
           docker push $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPO:latest
-          echo "image=$ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "ecr_registry=$ECR_REGISTRY" >> $GITHUB_OUTPUT
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
 
-      # ── Update Helm repo with new image tag (triggers ArgoCD sync) ──────────
-      - name: Update image tag and repository in Helm repo
+      # ── Use actions/checkout to properly clone and push to the Helm repo ──
+      # This is the official cross-repo pattern - handles auth automatically
+      - name: Checkout Helm repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.GH_USERNAME }}/eks-shop-helm
+          token: ${{ secrets.HELM_REPO_PAT }}
+          path: helm-repo
+
+      - name: Update values.yaml and push
         env:
-          IMAGE_TAG: ${{ github.sha }}
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          HELM_REPO: eks-shop-helm
-          GH_PAT: ${{ secrets.HELM_REPO_PAT }}
-          GH_USER: ${{ secrets.GH_USERNAME }}
+          ECR_REGISTRY: ${{ steps.build.outputs.ecr_registry }}
+          IMAGE_TAG: ${{ steps.build.outputs.image_tag }}
         run: |
-          git config --global user.email "ci@github-actions.com"
-          git config --global user.name "GitHub Actions CI"
-
-          # GitHub Actions auto-installs a credential helper using GITHUB_TOKEN which
-          # intercepts ALL GitHub git operations — this overrides and clears it so our
-          # PAT token in the URL takes effect instead.
-          git config --global credential.helper ""
-          git config --global url."https://x-access-token:${GH_PAT}@github.com/".insteadOf "https://github.com/"
-
-          git clone https://github.com/$GH_USER/$HELM_REPO.git helm-repo
           cd helm-repo
+          git config user.email "ci@github-actions.com"
+          git config user.name "GitHub Actions CI"
 
           sed -i "s|repository: .*|repository: \"$ECR_REGISTRY/shop-frontend\"|" shop-frontend/values.yaml
           sed -i "s|tag: .*|tag: \"$IMAGE_TAG\"|" shop-frontend/values.yaml
 
-          git add .
-          git commit -m "ci: update shop-frontend -> $IMAGE_TAG [skip ci]"
+          git add shop-frontend/values.yaml
+          git diff --staged --quiet || git commit -m "ci: update shop-frontend to $IMAGE_TAG [skip ci]"
           git push
